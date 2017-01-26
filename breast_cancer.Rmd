@@ -1,0 +1,696 @@
+---
+title: "Breast Cancer Prediction from Measurements"
+
+output: 
+  html_document
+    
+---
+
+<br><br>
+
+##      Analysis of University of Wisconsin Data
+
+#####    January 25, 2017
+Prepared by Marcel Merchat
+
+<br><br>
+
+##     Overview
+We explore ten averaged tumor variables and a corresponding set of worst dimensions for the same variables. Our analysis quantifies how the worst dimensions of malignant tumors are greater than the worst dimensions of healthier benign ones. Next we develop a quantitative formula that predicts whether tumors are malignant or benign using a training set selected from the raw data. The remaining data is used as a validation set to evaluate how well the formula works. 
+
+We adjust the formula to balance the probability of detecting malignant tumors against the rate of false alarms. The relationship between these probabilites are illustrated by the characteristic curve in Figure-XXX. In statistical detection theory, such a plot is called a receiver operating curve (ROC). For example, in the case of finding enemy warplanes with a radar receiver system, the probability of detecting an enemy plane would be plotted against the probability of a false alarm and possibly shooting down a friendly plane. This illustrates how the probabilities of detection and false alarms are associated with different costs and should be considered separately rather than overall accuracy.
+
+We build and test our prediction formula using the subset of observations that have 8-digit serial numbers, defining this subset as Group-8. Some insight into why the data is probed using only 8-digit serial numbers can be seen in Plot-1 and Plot-2 below, but we do not attempt to discuss this division of the raw data in depth; instead, we move forward and study Group-8; further study is needed for the other groups. Of the total of 579 observations, 70 belong to Group-8 with 49 of these randomly selected for the training group and 21 reserved for validation. While all of the raw data consists of 357 benign and 212 malignant cases, Group-8 consists of 37 benign and 33 malignant cases which indicates a higher rate of malignant cancers in Group-8 which could also require future consideration.
+
+<br><br>
+
+##    Raw Data
+
+The data file is available from the University of Wisconsin server at http://ftp.cs.wisc.edu/math-prog/cpo-dataset/machine-learn/cancer/WDBC/WDBC.dat. Since this source lacked column names, the column names were taken from an updated version that can only be manually downloaded at https://www.kaggle.com/uciml/breast-cancer-wisconsin-data. There are 32 columns of data including identification, diagnosis, and three groups of ten variables. There are a total of 579 rows of observation records consisting of 357 benign (B) and 212 malignant (M) cases. The statistical mean values for the ten variables below are reported in Columns 3-12.
+
+###### a) radius (mean of distances from center to points on the perimeter) 
+###### b) texture (standard deviation of gray-scale values)
+###### c) perimeter
+###### d) area
+###### e) smoothness (local variation in radius lengths)
+###### f) compactness (perimeter^2 / area - 1.0)
+###### g) concavity (severity of concave portions of the contour)
+###### h) concave points (number of concave portions of the contour)
+###### i) symmetry
+###### j) fractal dimension ("coastline approximation" - 1)
+
+The corresponding standard errors for the ten variables are reported in Columns 13-22 and the correspsonding worst values in Columns 23-32. For example, since Field-3 is the mean radius, Field-13 is standard error (se) of the radius and Field-23 is the worst radius.
+
+<br><br>
+
+##   Exploration
+
+To simplify the model and to make more accurate predictions, ANOVA analysis instructs us to simplify the model by eliminating correlated variables. For example, the radius, perimeter, and area are highly correlated and only one of these is used for any given comparison. Similarly, concavity and concave points are correlated. Finally, each variable was separately tested for its prediction accuracy. The worst perimeter, worst concavity, and worst concave points columns were selected for exploration to be plotted against the mean compactness and mean perimeter.
+ 
+```{r setup, results='hide', echo = FALSE, message=F, warning=F}
+
+##library(dplyr)
+library(lattice)
+
+library(ggplot2)
+library(caret)
+library(glmnet)
+library(randomForest)
+library(AppliedPredictiveModeling)
+
+library(psych)
+library(xtable)
+
+
+library(grid)
+library(gridExtra)
+library(stats)
+
+library(pROC)
+library(plotROC)
+
+oldw <- getOption("warn")
+options(warn = -1)
+
+```
+
+### Different Types of Serial Numbers
+There are six different types of serial numbers in the training dataset such that some serial numbers have 4 digits, some have 5 digits, and so on up to nine digits. We will build our prediction formula using only the 8-digit type which we designate as Group-8.
+
+<br><br>
+
+```{r raw_data, echo=FALSE, results='hide'}
+
+fileurl <- "http://ftp.cs.wisc.edu/math-prog/cpo-dataset/machine-learn/cancer/WDBC/WDBC.dat"
+## fileurl <-  "https://archive.ics.uci.edu/ml/datasets/Breast+Cancer+Wisconsin+%28Diagnostic%29" metadata
+##download.file(fileurl, "breast_cancer_wi_data.csv")
+
+raw_data <- read.csv("breast_cancer_wi_data.csv", header = FALSE, check.names = FALSE)
+col_names <-  read.csv("raw/column_names.csv", header = FALSE, nrows = 1)
+#colnames(raw_data) <- unname(t(col_names)[,1])
+colnames(raw_data) <- c("id","diagnosis",
+                "radius_mean", "texture_mean",
+                "perimeter_mean", "area_mean",
+                "smoothness_mean", "compactness_mean",
+                "concavity_mean","concave_points_mean",
+                "symmetry_mean", "fractal_dimension_mean",
+               
+                "radius_se", "texture_se",
+                "perimeter_se", "area_se",
+                "smoothness_se", "compactness_se",
+                "concavity_se", "concave_points_se",
+                "symmetry_se", "fractal_dimension_se",
+                 
+                "radius_worst", "texture_worst",
+                "perimeter_worst", "area_worst",
+                "smoothness_worst", "compactness_worst",
+                "concavity_worst", "concave_points_worst",
+                "symmetry_worst", "fractal_dimension_worst"
+               )
+
+test_names <- c(colnames(raw_data)[3:12],colnames(raw_data)[23:32])
+#test_names <- c(test_names[1],test_names[3:4], test_names[7:8],test_names[11],test_names[13:14], test_names[17:18])
+
+rearranged_data <- raw_data[,-2] ## remove diagnosis from second column
+diagnosis_raw <- as.factor(raw_data[,2])
+levels(diagnosis_raw)[1] 
+#diagnosis_raw <- factor(diagnosis_raw,levels(diagnosis_raw) [c(1,2)])
+rearranged_data[,"diagnosis"] <- diagnosis_raw 
+id <- rearranged_data[,"id"]
+id <- sub("^ +", "", id)
+id <- sub(" +$", "", id)
+id_length <- nchar(as.character(rearranged_data[,"id"]))
+id_length
+head(rearranged_data,25)
+rearranged_data[,"Group_ID"] <- as.factor(id_length)
+
+#dim(rearranged_data[rearranged_data$Group_ID=="8",]) # 70 cases
+specialgroup <- rearranged_data[rearranged_data$Group_ID=="8",]
+dim(specialgroup[specialgroup$diagnosis=="B",]) #  37
+dim(specialgroup[specialgroup$diagnosis=="M",]) #  33
+
+set.seed(3433)
+inBuild <- createDataPartition(y=rearranged_data$diagnosis,p=0.7,list=FALSE)
+build <- rearranged_data[inBuild,]
+
+build[,"perimeter_concavity_product"] <- build[,"perimeter_mean"]  * build[,"concave_points_worst"] ##########################
+validation <- rearranged_data[-inBuild,]
+
+set.seed(32323)
+folds <- createFolds(y=build$diagnosis,k=3,list=TRUE,returnTrain=FALSE)
+sapply(folds,length)
+
+testing <- build[folds$Fold1,]
+training  <- rbind(build[folds$Fold2,],build[folds$Fold3,])
+
+train4 <- training[training$Group_ID=="4",]
+train5 <- training[training$Group_ID=="5",]
+train6 <- training[training$Group_ID=="6",]
+train7 <- training[training$Group_ID=="7",]
+train8 <- training[training$Group_ID=="8",]
+
+test8  <-  testing[ testing$Group_ID=="8",]
+train9 <- training[training$Group_ID=="9",]
+
+train49 <- rbind(train4,train9)
+rows49 <- dim(train49)[1]
+train49[,"Group_ID"] <- as.factor(rep("49",rows49))
+
+
+train498 <- rbind(train49,train8)
+train5678 <- rbind(train5,train6,train7,train8)
+
+traina <- train8
+test_data <- test8
+
+Serial_Number_Length <- as.factor(c("(digits)", "4", "5", "6", "7", "8", "9"))
+Quantity <- c(" ",dim(train4)[1], dim(train5)[1], dim(train6)[1], dim(train7)[1], dim(train8)[1], dim(train9)[1])
+df1 <- data.frame(Serial_Number_Length, Quantity)
+group_size <- xtable(df1)
+
+```
+
+
+
+```{r table1, echo=FALSE, results='asis', fig.width=4, fig.height=2}
+
+print(xtable(group_size, caption = "Table-1: Serial Number Groups", align = "ccc", size="14pt"),  caption.placement ='top',
+      include.rownames=FALSE, type = "html", latex.environments = "center")  
+
+```
+
+<br><br>
+
+#### Characteristics for Groups 4 and 9 don't match other groups
+
+The group number indicates the number of digits in the serial number which varies from four to nine digits. Groups 4 and 9 were deleted from this study because Group-49 has a steeper fitted line than Group-8 in Plot-1 below. Group-49 consists of Group-4 and Group-9 combined into a single group.
+
+```{r functionsection, echo=FALSE}
+
+get_concave_points_fit <- function(df) {
+        fit <- lm(df$concave_points_worst ~ df$compactness_mean)
+        fit$coefficients
+}
+
+get_concave_points_plot <- function(df,m1,int1,m2,int2,titlemain){
+    ggplot(df, aes(compactness_mean, concave_points_worst)) + 
+    geom_point(aes(color = Group_ID), alpha=1, size=3) +  
+    scale_color_manual(values=c("#00EEDD","#00CCAA","#009966","#993333")) +   #"#006633","#CCBBBB"
+    xlim(0, 0.3)+ylim(0, 0.3) +
+    xlab("Mean Compactness") +
+    ylab("Worst Concave Points (mm)") +
+    geom_abline(slope = m1, intercept = int1, size=1.3, color="#006633") +
+    geom_abline(slope = m2, intercept = int2, size=1.3, color="#BBAAAA") +
+    ggtitle(titlemain) +
+    theme(plot.title = element_text(hjust = 0.5, color="#993333", size=18, face="bold.italic"),
+    axis.title.x = element_text(color="#993333", size=16),
+    axis.title.y = element_text(color="#993333", size=16),
+    panel.background = element_rect(fill = "#EFE5E5", colour = "brown",
+    size = 0.5, linetype = "solid"),
+    plot.background = element_rect(fill = "#E0DADA"))
+}
+
+get_concave_2Group_plot <- function(df,m1,int1,m2,int2){
+    ggplot(df, aes(compactness_mean, concave_points_worst)) + 
+    geom_point(aes(color = Group_ID), alpha=1, size=3) +  
+    scale_color_manual(values=c("#006633","#CCBBBB")) +   
+    xlim(0, 0.3)+ylim(0, 0.3) +
+    xlab("Mean Compactness") +
+    ylab("Worst Concave Points (mm)") +
+    geom_abline(slope = m1, intercept = int1, size=1.3, color="#006633") +
+    geom_abline(slope = m2, intercept = int2, size=1.3, color="#BBAAAA") +
+    ggtitle("Steeper Curve for Group 49") +
+    theme(plot.title = element_text(hjust = 0.5, color="#993333", size=18, face="bold.italic"),
+    axis.title.x = element_text(color="#993333", size=16),
+    axis.title.y = element_text(color="#993333", size=16),
+    panel.background = element_rect(fill = "#EFE5E5", colour = "brown",
+    size = 0.5, linetype = "solid"),
+    plot.background = element_rect(fill = "#E0DADA"))
+}
+
+df <- traina
+
+#get_calculated_data(df, kmeansObj, m=1, b=1)
+get_calculated_data <- function(df, kmeansObj, m, b, cutoff){
+## Add cluster group to raw data
+    concave_points_cluster <- kmeansObj$cluster                 # Level 1 is malignant
+    concave_points_cluster[concave_points_cluster==1] <- "M" 
+    concave_points_cluster[concave_points_cluster==2] <- "B" 
+    df[,"concave_points_cluster"] <- as.factor(concave_points_cluster) 
+    
+## Add cluster group to raw data
+    logistic_cluster <- df$perimeter_mean < 100 & df$concavity_worst <  m * df$perimeter_mean + b  + cutoff
+    #test_logistic <- df$perimeter_mean < 100 & df$concavity_worst <  m * df$perimeter_mean + b  + cutoff
+               # Level 1 is malignant
+    logistic_cluster[logistic_cluster==FALSE] <- "M" 
+    logistic_cluster[logistic_cluster==TRUE] <- "B" 
+    df[,"concavity_cluster"] <- as.factor(logistic_cluster) 
+    
+    df
+}
+
+get_adjusted_concave_points_fit <- function(df, diagnosis) {
+        fit <- lm(df$concave_points_worst[df$diagnosis==diagnosis] ~ df$compactness_mean[df$diagnosis==diagnosis])
+        fit$coefficients
+}
+
+get_concave_points_kmeans_plot <- function(df, m1, int1,m2, int2, kmeansObj, titlemain){
+    ggplot(df, aes(compactness_mean, concave_points_worst)) + 
+    geom_point(aes(color = diagnosis), size=3) + 
+    scale_color_manual(values = c("turquoise","brown")) +
+    xlab("Mean Compactness") +
+    ylab("Worst Concave Points") +
+    geom_abline(slope = m1, intercept = int1, size=1.3, color="brown") +
+    geom_abline(slope = m2, intercept = int2, size=1.3, color="turquoise") +
+    geom_segment(aes(x = kmeansObj$centers[2,1]-0.015, y = kmeansObj$centers[2,2],
+                   xend = kmeansObj$centers[2,1]+0.015, yend = kmeansObj$centers[2,2]), colour = "black") +
+     geom_segment(aes(x = kmeansObj$centers[2,1], y = kmeansObj$centers[2,2]-0.02,
+                   xend = kmeansObj$centers[2,1], yend = kmeansObj$centers[2,2]+0.02), colour = "black") +
+     geom_segment(aes(x = kmeansObj$centers[1,1]-0.015, y = kmeansObj$centers[1,2],
+                   xend = kmeansObj$centers[1,1]+0.015, yend = kmeansObj$centers[1,2]), colour = "black") +
+     geom_segment(aes(x = kmeansObj$centers[1,1], y = kmeansObj$centers[1,2]-.02,
+                   xend = kmeansObj$centers[1,1], yend = kmeansObj$centers[1,2]+0.02), colour = "black") +
+    ggtitle(titlemain) +
+    theme(plot.title = element_text(hjust = 0.5, color="#993333", size=18, face="bold.italic"),
+         axis.title.x = element_text(color="#993333", size=16),
+         axis.title.y = element_text(color="#993333", size=16),
+         panel.background = element_rect(fill = "#EFE5E5", colour = "brown",
+             size = 0.5, linetype = "solid"),
+         plot.background = element_rect(fill = "#E0DADA"))
+}
+
+get_line_parameters <- function(df,diagnosis){
+    slope <- get_adjusted_concave_points_fit(df,diagnosis)[2]
+    intercept <- get_adjusted_concave_points_fit(df,diagnosis)[1]
+    c(slope, intercept)
+}
+
+get_kmeans <- function(df){
+    compactness_mean <- df$compactness_mean
+    concave_points_worst <- df$concave_points_worst
+    
+    kmeansdf <- data.frame(compactness_mean, concave_points_worst)
+    kmeans(kmeansdf, centers = 2)
+}
+
+get_concavity_fit <- function(df, diagnosis) {
+         fit <- lm(df$concavity_worst[df$diagnosis==diagnosis] ~ df$perimeter_mean[df$diagnosis==diagnosis])
+         fit$coefficients
+}
+
+get_concavity_plot <- function(df,m1,int1,titlemain){
+    ggplot(df, aes(perimeter_mean, concavity_worst)) + 
+    geom_point(aes(color = diagnosis), size=3) + 
+    scale_color_manual(values=c("turquoise","brown")) +
+    xlab("Mean Perimeter") +
+    ylab("Worst Concavity") +
+    
+    geom_segment(aes(x = 60, y = 60 * m1 + int1 + 0.05,
+                  xend = 100, yend = 100 * m1 + int1 + 0.05), colour = "turquoise") +
+    geom_segment(aes(x = 100, y = 0,
+                  xend = 100, yend = 100 * m1 + int1 + 0.05), colour = "turquoise") +
+    ggtitle(titlemain) +
+    theme(plot.title = element_text(hjust = 0.5, color="#993333", size=18, face="bold.italic"),
+        axis.title.x = element_text(color="#993333", size=16),
+        axis.title.y = element_text(color="#993333", size=16),
+        panel.background = element_rect(fill = "#EFE5E5", colour = "brown",
+            size = 0.5, linetype = "solid"),
+        plot.background = element_rect(fill = "#E0DADA"))
+}
+
+one_variable_mod <- function(data_vector, diagnosis){
+    dat <- data.frame(data_vector, diagnosis, stringsAsFactors = FALSE)
+    colnames(dat) <- c("test_results", "diagnosis")
+    head(dat)
+    train(diagnosis ~ test_results, method="rf", data=dat)
+}
+
+get_sensitivity <- function(predictions, diagnosis){
+    detection <- predictions == diagnosis
+    df <- data.frame(predictions,diagnosis,detection,stringsAsFactors = FALSE) 
+    colnames(df) <- c("prediction","diagnosed","detect")
+
+    detected <- df[df$diagnosed=="M",]
+    sumdetect <- sum(detected$detect==TRUE)
+    lendetect <- dim(detected)[1]
+    sumdetect # trf[2,2]
+    sumdetect / lendetect
+}
+
+get_selectivity <- function(predictions, diagnosis){
+    detection <- predictions == diagnosis
+    df <- data.frame(predictions, diagnosis, detection, stringsAsFactors = FALSE) 
+    colnames(df) <- c("prediction", "diagnosed", "detect")
+
+    cleared <- df[df$diagnosed=="B",]
+    sumcleared <- sum(cleared$detect==TRUE)
+    lencleared <- dim(cleared)[1]
+    sumcleared # trf[1,1]
+    sumcleared / lencleared
+}
+
+```
+
+
+```{r plotgroup1, echo=FALSE, fig.width=14, fig.height=7}
+
+m49 <- get_concave_points_fit(train49)[2]
+b49 <- get_concave_points_fit(train49)[1]
+m8 <- get_concave_points_fit(train8)[2]
+b8 <- get_concave_points_fit(train8)[1]
+plot1 <- get_concave_2Group_plot(train498,m49,b49,m8,b8)
+
+```
+
+
+```{r plotgroup2, echo=FALSE, fig.width=14, fig.height=7}
+
+
+linefit5678 <- lm(train5678$concave_points_worst ~ train5678$compactness_mean)
+m5678 <- linefit5678$coefficients[2]
+b5678 <- linefit5678$coefficients[1]
+plot2 <- get_concave_points_plot(train5678,m5678,b5678,m8,b8,"Remaining Data without Group-49")
+
+#grid.arrange(plot1, plot2, ncol=2)
+grid.arrange(textGrob("Plot-1: K-Means Clusters",gp=gpar(fontsize=16, col="darkgreen")),textGrob("Plot-2: Adjustment with Improvised Rule",gp=gpar(fontsize=16, col="darkgreen")), plot1, plot2, ncol=2,
+             layout_matrix = rbind(c(1,2), 
+                                   c(3,4),
+                                   c(3,4)),
+             heights=unit(c(10,85,85), c("mm", "mm","mm")))
+
+
+```
+
+Plot-2 shows the data is more uniform with Group-49 deleted. Notice that Group-8 in brown seems to represent typical members with this change. For the remainder of this study, we focus on Group-8. 
+
+<br><br>
+
+### Exploration of Group-8
+
+#### Separating Benign (B) and Malignant (M) Clusters
+
+<br><br>
+
+#### Method-1: k-means
+
+A plot of the worse concave points versus mean compactness appears to separate the malignant and benign data points into two loose clusters in Plot-3 below. The center of the benign (B) and malignant (M) clusters was determined using the kmeans function and are indicated by crosses in the figure. To help predict the diagnosis, the assigned cluster group is added to the raw data frame. The fitted lines for the clusters are distinct from one another with the line through the malignant points higher in the plot. This indicates greater worst concave points dimensions for a given degree of tumor compactness.
+
+```{r plotgroup3, echo=FALSE}
+
+kmeanstrain <- get_kmeans(traina)
+kmeanstest <- get_kmeans(test_data)
+
+mm8 <- get_line_parameters(traina,"M")[1]
+bm8 <- get_line_parameters(traina,"M")[2]
+mb8 <- get_line_parameters(traina,"B")[1]
+bb8 <- get_line_parameters(traina,"B")[2]
+
+plot3 <- get_concave_points_kmeans_plot(traina,mm8,bm8,mb8,bb8,kmeanstrain,"Worst Concave Points vs Mean Compactness")
+
+
+```
+
+<br><br>
+
+#### Method-2: Adjustment of Prediction with Improvised Rule
+
+A plot of worst Concavity versus mean perimeter also divides the data into two groups but this time the nature of the separation does not lend itself to k-means defined clusters of benign and malignant points because the perimeter is a regressor for concavity and the range of the mean perimeter of malignant tumors covers some of the range for benign tumors. But we can devise some improvised formulas that isolate the benign tumors at the lower left corner of Plot-4 as follows.
+
+###### Rule-1: The tumors are all benign if the worst concavity is below 100-mm and within 0.05-mm of the regression line or lower.
+###### Rule-2: Otherwise assume tumors are malignant. 
+
+
+```{r plotgroup4, echo=FALSE, fig.width=14, fig.height=7}
+
+mm8b <- get_concavity_fit(traina,"M")[2]
+bm8b <- get_concavity_fit(traina,"M")[1]
+mb8b <- get_concavity_fit(traina,"B")[2]
+bb8b <- get_concavity_fit(traina,"B")[1]
+
+plot4 <- get_concavity_plot(traina,mb8b,bb8b,"Worst Concavity vs Mean Perimeter")
+
+grid.arrange(textGrob("Plot-3: K-Means Clusters",gp=gpar(fontsize=16, col="darkgreen")), textGrob("Plot-4: Adjustment with Improvised Rule",gp=gpar(fontsize=16, col="darkgreen")), plot3, plot4, ncol=2,
+             layout_matrix = rbind(c(1,2), 
+                                   c(3,4),
+                                   c(3,4)),
+             heights=unit(c(10,84,84), c("mm", "mm","mm")))
+
+```
+
+<br><br>
+
+#### Adjusting Detection Power versus False Alarms (ROC Curve) with Improvised Rules
+Rule-2 rule is defined by the blue lines in Plot-4. It helps predict if tumors are benign or malignant but it also also provides a way to adjust the automated predictions provided by the carrot package in order to optimize the power of detecting existing malignant tumors at the cost of producing more false alarms. This is an inherent tradeoff between detection power and number of false alarms when the tumors are not malignant and generally lowers the overall accuracy, but our goal is to optimize the overall cost of missed detections and  false alarms instead of ptimizing an overall accuracy figure. 
+
+<br><br>
+
+#### Regression Analysis Help
+
+If the data for benign and malignant cases appear mixed together or cover the same range, we might still be able to separate them using regression. In Plot-5, the worst perimeter measurements for the two groups overlap; but after regression against the mean tumor radius is applied in Plot-6, benign and malignant cases separate into distinct groups.  
+
+```{r misc_plots, echo=FALSE, fig.width=14, fig.height=7}
+
+plot5 <- ggplot(traina, aes(diagnosis, perimeter_worst)) + 
+    geom_point(aes(color = diagnosis),alpha=0.2, size=3) + #hjust = -0.4, vjust = 1.5
+    xlab("Benign (B) or Malignant (M) Diagnosis") +
+    ylab("Worst Perimeter (mm)") +
+    ggtitle("Worst Perimeter") +
+    theme(plot.title = element_text(hjust = 0.5, color="#993333", size=18, face="bold.italic"),
+         axis.title.x = element_text(color="#993333", size=16),
+         axis.title.y = element_text(color="#993333", size=16),
+         panel.background = element_rect(fill = "#EFE5E5", colour = "brown",
+             size = 0.5, linetype = "solid"),
+         plot.background = element_rect(fill = "#E0DADA"))
+
+plot6 <- ggplot(traina, aes(radius_mean, perimeter_worst)) + 
+    geom_point(aes(color = diagnosis),alpha=0.5, size=3) + 
+    xlab("Mean Radius") +
+    ylab("Worst Perimeter (mm)") +
+    geom_abline(slope = 5, intercept = 30, size=1.3, color="darkgreen") +
+    ggtitle("Worst Perimeter vs. Mean Radius") +
+    theme(plot.title = element_text(hjust = 0.5,
+                        color="#993333", size=18, face="bold.italic"),
+         axis.title.x = element_text(color="#993333", size=16),
+         axis.title.y = element_text(color="#993333", size=16),
+         panel.background = element_rect(fill = "#EFE5E5", colour = "brown",
+             size = 0.5, linetype = "solid"),
+         plot.background = element_rect(fill = "#E0DADA"))
+
+grid.arrange(textGrob("Plot-5: Before Applying Regression",gp=gpar(fontsize=16, col="darkgreen")),textGrob("Plot-6: After Regression",gp=gpar(fontsize=16, col="darkgreen")), plot5, plot6, ncol=2,
+             layout_matrix = rbind(c(1,2), 
+                                   c(3,4),
+                                   c(3,4)),
+             heights=unit(c(10,84,84), c("mm", "mm","mm")))
+
+```
+
+<br><br>
+
+##   Prediction Model
+
+After an initial attempt to build a prediction model for malignant tumors with all the data and noticing that there were subgroups with different characteristics we built a model based on the 70 rows of Group-8 to explore what can be learned. Analysis of the other groups should also be made and compared with Group-8.
+Model building process began using the mean variables reported in Columns 3-12 and the largest values reported in the third group in Columns 23-32. The standard errors reported in Columns 13-22 could be considered in a further inquiry. 
+
+The data was divided into model building and validation sections. The build section was then further divided using a two-fold partition for training and model tryout testing. The random forest method was selected. 
+
+Data fields that were more than 90% correlation with the radius_mean parameter were eliminated from the model. All of the data fields were separately tested for their prediction accuracy for Benin or Malignant diagnosis in Column-2. Fields with sensitivity or selectivity accuracy below  60% were eliminated from the model.
+
+
+```{r utility_functions, echo = FALSE, message=FALSE,warning=F}
+
+# sensitivity <- c()
+# selectivity <- c()
+
+
+## Model
+ 
+    trainb <- get_calculated_data(traina, kmeanstrain, m=mb8b, b=bb8b, cutoff=0.05)
+    test_data <- get_calculated_data(test_data, kmeanstest, m=mb8b, b=bb8b, cutoff=0.05)
+    
+    fitControl <- trainControl(## 3-fold CV
+                           method = "repeatedcv",
+                           number = 3,
+                           ## repeated ten times
+                           repeats = 3,
+                           summaryFunction=twoClassSummary, 
+                            classProbs=T,
+                            savePredictions = T)
+    
+    set.seed(32323)
+    rffit2 <- train(diagnosis ~ perimeter_mean + compactness_mean +
+                    concave_points_worst + concavity_worst + concave_points_cluster + concavity_cluster, method="rf", 
+                     trControl = fitControl, #  verbose = FALSE,
+                     metric = "ROC",
+                     data=trainb)
+    
+s1 <- predict(rffit2, newdata=test_data[,-32])
+
+Actual_Diagnosis <- test_data[,32]
+test_predictions <- predict(rffit2, newdata=test_data[,-32])
+
+```
+
+<br><br>
+
+###  Training Test Results
+
+```{r confusion_matrix1, echo=FALSE, results='asis', fig.width=4, fig.height=2}
+
+Testing_Accuracy <- test_predictions==test_data[,32]
+predictions <- data.frame(test_predictions,Actual_Diagnosis, Testing_Accuracy)
+#selected_data <- c("radius_mean", "perimeter_mean", "compactness_mean", "concavity_mean", "concave_points_mean")
+
+xt3 <- xtable(predictions)
+
+print(xtable(xt3, caption = "Table-2: Results for Test Set", align = "cccc", size="14pt"),
+      caption.placement ='top', include.rownames=FALSE, type = "html")  
+
+```
+
+<br><br>
+
+### Performance
+
+### Detection Power versus False Alarms (ROC Curve) 
+This is an inherent tradeoff between detection power and the number of false alarms. This curve was generated using R Tools carrot, pROC, plotROC using the train function output for the prediction model. The "pred" list item of the output contains the data frame for the curve.  
+
+#####    Sensitivity: The probability of a positive test result if the disease is present
+#####    Specificity: The probability of negative test if the disease is not present
+#####    Probability of False Alarm  =  1 - Specificity
+
+Rather than overall accuracy, we often need to focus on the costs associated with sensitivity and the selectivity independently. For example, in the case of a defensive radar system, the selectivity determines the probability shooting down your own plane and injuring a friendly pilot. It would be a mistake to focus on a more general overall accuracy that mixes sensitivity and selectivity into a single parameter when the costs of failing to detect a condition (sensitivity) and false alerts (the complement of sensitivity) are separately important with their own costs. Similarly, in the case of diagnosing cancer, the cost of failing to detect it and the cost of false alarms should be considered separately.
+
+To help control our model, the cluster identification for k-means for worst concave points as shown in Plot-3 for the training set and worst concavity according to the blue lines in Plot-4 were added to the data frame. A further enhancement might include worst perimeter analysis from Plot-6. Adding extra parameters should help adjust the ROC curve by raising the detection power for malignant tumors in order to optimize the power of detecting existing malignant tumors at the cost of producing more false alarms.
+
+```{r roc_curve, echo=FALSE, results='asis', fig.width=7, fig.height=7}
+
+# Select a parameter setting
+selectedIndices <- rffit2$pred$mtry == 2
+
+ggplot(rffit2$pred[selectedIndices, ], aes(m = M, d = factor(obs, levels = c("B", "M")))) + 
+    geom_roc(hjust = -0.4, vjust = 1.5) +
+    coord_equal() +
+    xlab("Probability of False Alarm") +
+    ylab("Probability of Detecting Malignant Tumor") +
+    ggtitle("ROC Curve for Prediction Model")
+    
+``` 
+
+<br><br> 
+
+### Simplified ROC Curve for Worst Concave Points Test Set Results 
+This characteristic curve is based only based on the worst concave points of the test. 
+
+```{r trainingroc, echo=FALSE, results='asis'}
+
+pm <- test_data$perimeter_mean
+
+bin <- cut(test_data$concave_points_worst, breaks = c(0,seq(0.16,0.28, by = 0.02)), labels = 1:7)
+dft <- data.frame(test_predictions, Actual_Diagnosis, Testing_Accuracy, pm, bin)
+dft[,"concave_points_worst"] <- test_data$concave_points_worst
+dft <- dft[order(dft[,"concave_points_worst"]),]
+
+    total <- 0        # Number of patients in bin
+    truepos <- 0    # Number of true positives
+    falsepos <- 0   # Number of false positives
+    totpos <- 0     # The number of positives
+    totneg <- 0     # The number of negatives
+    nr <- 0
+    sens <- c()
+    omspec <- c()
+
+for(i in unique(dft$bin)){
+    tdat <- dft[dft$bin == i,]
+    nr <- dim(tdat)[1] + nr
+    tdiag <- tdat$Actual_Diagnosis
+    tbin <- tdat$bin
+    tpred <- dft$test_predictions[dft$bin == i]
+    tab <- as.matrix(table(tdiag, tpred)) #test_predictions
+    
+    tot <- dim(tdat)[1]                             # Number of patients in bin
+    truep <- tab[2,2]   # Number of true positives
+    falsep <- tab[2,1]  # Number of false negatives
+    totp <- sum(tab[2,])                          # The total number of positives (one number)
+    totn <- sum(tab[1,])                          # The total number of negatives (one number)
+    
+    truepos <- c(truepos, truep)
+    falsepos <- c(falsepos, falsep)
+    totpos <- c(totpos, totp)
+    totneg <- c(totneg, totn)
+ 
+}
+  
+ss <- sum(totpos)      
+if (ss > 0 ) {                         # Sensitivity (fraction true positives)
+        
+        csens <- cumsum(truepos/ss)
+} 
+ so <- sum(totneg)
+if (so > 0)  {                       # specificity (false positives)                
+       
+        comspec <- cumsum(falsepos)/so
+}        
+
+
+csens <- c(0, csens, 1)
+comspec <- c(0, comspec, 1)           # Numbers when we classify all as normal
+
+rocplot <- data.frame(comspec,csens)
+
+plot(comspec, csens, type="b", xlim=c(0,1), ylim=c(0,1), lwd=2,
+     xlab="1 - Specificity", ylab="Sensitivity") 
+
+    grid()
+    abline(0,1, col="red", lty=2)
+    
+  
+```
+
+
+
+<br><br> 
+
+### Confusion Matrix
+
+The table below describes the results for the test set.
+
+```{r confusion_matrix, echo=FALSE, results='asis', fig.width=4, fig.height=2}
+
+cm <- confusionMatrix(data = test_predictions, test_data$diagnosis)
+benign_test <- Actual_Diagnosis=="B"
+mal_test <- Actual_Diagnosis=="M"
+
+negative_count <- sum(predictions[Actual_Diagnosis=="B" & test_predictions=="B","Testing_Accuracy"])
+positive_count <- sum(predictions[Actual_Diagnosis=="M" & test_predictions=="M","Testing_Accuracy"])
+real_benign_count <- sum(Actual_Diagnosis=="B")
+real_malignant_count <- sum(Actual_Diagnosis=="M")
+
+fa <- negative_count / real_benign_count
+pd <- positive_count / real_malignant_count
+
+Parameter <- c("Detection Power","False Alarm")
+Test <- c("Sensitivity", "1 - Specificity")
+Diagnosis <- c("Malignant","Benign")
+Counts <- c(real_malignant_count,real_benign_count)
+Correct_Detections <- c(positive_count, negative_count)
+Accuracy <- c(cm$byClass[2], cm$byClass[1])
+Manual_Accuracy <- c(pd,fa)
+#Balanced_Accuracy <- cm$byClass[11]
+
+dfconfus1 <- data.frame(Parameter, Test, Diagnosis,Counts,Correct_Detections,Accuracy)
+xt4 <- xtable(dfconfus1)
+
+print(xtable(xt4, caption = "Table-3: Prediction Accuracy for Test Set", align = "ccccccc", size="14pt"),
+      caption.placement ='top', include.rownames=FALSE, type = "html")
+
+
+```
+
+<br><br>
+
+Code for this reproducible report is available at https://github.com/marcelMerchat/breastCancer_WI.
+
+<br><br>
+
+#### THE END
+
